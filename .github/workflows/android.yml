@@ -1,0 +1,66 @@
+# SSH 리모트 안드로이드 앱 (APK) 빌드
+# - 푸시할 때마다 빌드해서 Actions 결과물(ssh-remote-apk)로 올림
+# - main 브랜치면 릴리스 "android-latest" 에 ssh-remote.apk 를 올려 휴대폰에서 바로 내려받게 함
+# - 서명 키는 저장소에 넣지 않고 처음 한 번 만들어 Actions 캐시에 보관 → 같은 키여야 새 버전을 덮어 설치할 수 있음
+name: Android APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: 서명 키 (캐시)
+        uses: actions/cache@v4
+        with:
+          path: ~/sshremote-signing
+          key: sshremote-signing-v1
+      - name: 서명 키 준비 (처음 한 번만 만듦) · 버전
+        run: |
+          mkdir -p ~/sshremote-signing
+          if [ ! -f ~/sshremote-signing/release.keystore ]; then
+            openssl rand -hex 16 > ~/sshremote-signing/pw
+            keytool -genkeypair -keystore ~/sshremote-signing/release.keystore -alias sshremote -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass "$(cat ~/sshremote-signing/pw)" -keypass "$(cat ~/sshremote-signing/pw)" \
+              -dname "CN=SshRemote" >/dev/null
+            echo "새 서명 키를 만들었습니다"
+          fi
+          echo "::add-mask::$(cat ~/sshremote-signing/pw)"
+          echo "SSHREMOTE_KEYSTORE=$HOME/sshremote-signing/release.keystore" >> "$GITHUB_ENV"
+          echo "SSHREMOTE_KEYSTORE_PASSWORD=$(cat ~/sshremote-signing/pw)" >> "$GITHUB_ENV"
+          echo "SSHREMOTE_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+      - name: APK 빌드
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk ssh-remote.apk
+          ls -la ssh-remote.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-remote-apk
+          path: ssh-remote.apk
+      - name: 내려받기 링크 (릴리스 android-latest, main 만)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete android-latest -y --cleanup-tag || true
+          gh release create android-latest ssh-remote.apk --prerelease --target "$GITHUB_SHA" \
+            --title "SSH 리모트 (최신 · 0.1.$GITHUB_RUN_NUMBER)" \
+            --notes "휴대폰에서 ssh-remote.apk 를 내려받아 설치하세요 (처음 한 번 '출처를 알 수 없는 앱' 허용). 새 버전은 지우지 않고 덮어 설치하면 됩니다."
